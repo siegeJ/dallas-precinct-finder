@@ -14,3 +14,5 @@ Example:
 2001 Main
 2003 Main
 ```
+
+Will output a file with same name + _PRECINCTS.txt
