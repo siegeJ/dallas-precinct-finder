@@ -1,30 +1,25 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
-using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
-using System.Threading;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
 
 namespace PrecinctFinder
 {
-    class PrecinctFinder
-    {
-        private static List<string> CommonAddressAbb = new List<string>()
-        {
-            "AVE", "BLVD", "CTR", "CIR","CT","DR","EXPY","HTS","HWY","IS","JCT","LK","LN","MTN","PKWY","PL","PLZ","RDG","RD","SQ","ST","STA","TER","TPKE","VLY","WAY"
-        };
+    using PrecinctMap = Dictionary<int, List<AddressData>>;
 
-        static void Main(string[] args)
+    public class PrecinctFinder
+    {
+        static void Init(bool abWaitForInput = true)
         {
             Console.ForegroundColor = ConsoleColor.Green;
             Console.WriteLine("Dallas County Precinct Finder");
             Console.WriteLine("By: CJ Stankovich https://github.com/siegeJ");
             Console.ForegroundColor = ConsoleColor.White;
-
 
             Console.WriteLine($"*****************");
             Console.WriteLine($"Place .txt files with addresses in same directory as this executable");
@@ -44,15 +39,57 @@ namespace PrecinctFinder
             Console.ForegroundColor = ConsoleColor.White;
 
             Console.WriteLine($"Press any key to continue...");
-            Console.ReadLine();
 
-            var filePaths = Directory.GetFiles(Directory.GetCurrentDirectory(), "*.txt").Where(f => !f.Contains("PRECINCTS")).ToList();
+            WaitForInput();
+        }
+
+        static void WaitForInput()
+        {
+            if (!Debugger.IsAttached)
+            {
+                Console.ReadLine();
+            }
+        }
+
+        static HttpClient _httpClient = new HttpClient();
+
+        static void Main(string[] args)
+        {
+            Init();
+
+            var defaultListSize = 16;
+            var dirList = new List<string>(defaultListSize);
+            var filePaths = new List<String>(defaultListSize);
+
+            foreach (var str in args)
+            {
+                if (File.Exists(str))
+                {
+                    filePaths.Add(str);
+                }
+                else if (Directory.Exists(str))
+                {
+                    dirList.Add(str);
+                }
+            }
+            
+            dirList.Add(Directory.GetCurrentDirectory());
+
+            foreach(var dir in dirList)
+            {
+                if (Directory.Exists(dir))
+                {
+                    Console.WriteLine($"Searching {dir} for .txt files");
+
+                    filePaths.AddRange(Directory.GetFiles(dir, "*.txt").Where(f => !f.Contains("PRECINCTS")).ToList());
+                }
+            }
 
             Console.WriteLine($"Found {filePaths.Count} Files:");
 
             if (filePaths.Count == 0)
             {
-                Console.WriteLine($"No files found in {Directory.GetCurrentDirectory()}");
+                Console.WriteLine($"No files found.");
             }
 
             foreach (var filePath in filePaths)
@@ -61,27 +98,27 @@ namespace PrecinctFinder
             }
 
             Console.WriteLine($"Press any key to continue...");
-            Console.ReadLine();
+            WaitForInput();
 
             //Put this up here so we arent recreating it. Whatevs.
-            using var httpClient = new HttpClient();
+
             //IDK just make something up
-            httpClient.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/84.0.4147.135 Safari/537.36");
+            _httpClient.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/84.0.4147.135 Safari/537.36");
 
             foreach (var filePath in filePaths)
             {
                 Console.WriteLine($"Getting precincts in file {filePath}");
 
                 //New lines with the precinct number
-                List<string> linesWithPrecincts = new List<string>();
-
+                var failedParses = new Dictionary<int, List<string>>();
+                var addressDataByPrecinct = new PrecinctMap();
                 var fileLines = File.ReadLines(filePath);
 
-                string zipcode = "";
+                var curZipcode = 0;
                 foreach (var fileLine in fileLines)
                 {
                     //blank
-                    if (string.IsNullOrEmpty(fileLine))
+                    if (string.IsNullOrWhiteSpace(fileLine))
                     {
                         continue;
                     }
@@ -91,98 +128,96 @@ namespace PrecinctFinder
                     //Zipcode line 
                     if (Regex.IsMatch(addressLineTrimmed, @"(^\d{5}$)|(^\d{9}$)|(^\d{5}-\d{4}$)"))
                     {
-                        zipcode = addressLineTrimmed;
+                        if (Int32.TryParse(addressLineTrimmed, out curZipcode))
+                        {
+                            Console.ForegroundColor = ConsoleColor.Green;
+                            Console.WriteLine($"Getting precincts for zipcode {curZipcode}");
+                            Console.ForegroundColor = ConsoleColor.White;
+                        }
+                        else
+                        {
+                            Console.WriteLine($"Could not parse zipcode from { addressLineTrimmed }");
+                        }
 
-                        Console.ForegroundColor = ConsoleColor.Green;
-                        Console.WriteLine($"Getting precincts for zipcode {zipcode}");
-                        Console.ForegroundColor = ConsoleColor.White;
-
-                        linesWithPrecincts.Add(zipcode);
                         continue;
                     }
 
-                    if (!string.IsNullOrEmpty(zipcode))
+                    if (curZipcode != 0)
                     {
                         Console.WriteLine($"Getting precinct for {addressLineTrimmed}");
 
                         try
                         {
-                            List<string> seperatedAddress = addressLineTrimmed.Split(' ').ToList();
-
-                            //Some assumptions here, assume first is always number, last is always Ln, Street, Blvd, etc.
-                            seperatedAddress.RemoveAll(c => CommonAddressAbb.Contains(c.ToUpper()));
-                            var addressNumber = seperatedAddress[0];
-
-                            string streetName = "";
-                            for (int i = 1; i < seperatedAddress.Count; i++)
+                            var queriedAddress = AddressData.QueryForAddressData(addressLineTrimmed, curZipcode);
+                            if (queriedAddress != null)
                             {
-                                streetName += seperatedAddress[i] + " ";
+                                var addrList = Utils.GetOrCreateListInDict(addressDataByPrecinct, queriedAddress.PrecinctNumber);
+                                addrList.Add(queriedAddress);
                             }
-
-                            //Maybe make this all async tasks later but I'm afraid of DDOSing the server :)
-                            var precinctResponse = GetPrecinct(addressNumber, streetName.Trim(), zipcode, httpClient).GetAwaiter().GetResult();
-                            linesWithPrecincts.Add($"{addressLineTrimmed} {precinctResponse.streets.FirstOrDefault()?.precinctname}");
+                            else
+                            {
+                                var failedParseList = Utils.GetOrCreateListInDict(failedParses, curZipcode);
+                                failedParseList.Add(addressLineTrimmed);
+                            }
                         }
                         catch (Exception ex)
                         {
                             Console.ForegroundColor = ConsoleColor.Red;
                             Console.WriteLine($"Failed to get precinct for {addressLineTrimmed}: {ex}");
                             Console.ForegroundColor = ConsoleColor.White;
-                            linesWithPrecincts.Add($"{addressLineTrimmed} ERROR");
+
+                            if (Debugger.IsAttached)
+                            {
+                                throw ex;
+                            }
                         }
 
-                
                     }
 
                 }
-
        
                 var oldFileName = filePath.Replace(".txt", "");
                 var newFileName = oldFileName + "_PRECINCTS.txt";
                 Console.WriteLine($"Creating new file {newFileName} with precinct names");
-                WriteFile(newFileName, linesWithPrecincts);
 
+                Utils.WriteFile(newFileName, addressDataByPrecinct, failedParses);
             }
 
             Console.WriteLine($"Finished, Press any key to exit...");
             Console.ReadLine();
-
-
         }
 
-
-        private static void WriteFile(string fileName, IEnumerable<string> lines)
+        public static async Task<PrecinctResponse> GetPrecinct(AddressData aAddressData)
         {
-            using TextWriter tw = new StreamWriter(fileName);
-
-            foreach (String s in lines)
+            List<KeyValuePair<string, string>> postData = new List<KeyValuePair<string, string>>
             {
-                tw.WriteLine(s);
-            }
-        }
+                new KeyValuePair<string, string>("PRECINCT_FINDER_ADDRESS_NUMBER", aAddressData.StreetNumber.ToString()),
+                new KeyValuePair<string, string>("PRECINCT_FINDER_STREET_NAME", aAddressData.StreetName),
+                new KeyValuePair<string, string>("PRECINCT_FINDER_ZIPCODE", aAddressData.ZipCode.ToString()),
+                new KeyValuePair<string, string>("lang", "en"),
+            };
 
-        private static async Task<PrecinctResponse> GetPrecinct(string addressNumber, string streetName, string zipCode, HttpClient httpClient)
-        {
-            List<KeyValuePair<string, string>> postData = new List<KeyValuePair<string, string>>();
-            postData.Add(new KeyValuePair<string, string>("PRECINCT_FINDER_ADDRESS_NUMBER", addressNumber));
             //postData.Add(new KeyValuePair<string, string>("PRECINCT_FINDER_PRE_DIRECTION", null));
-            postData.Add(new KeyValuePair<string, string>("PRECINCT_FINDER_STREET_NAME", streetName));
-            //postData.Add(new KeyValuePair<string, string>("PRECINCT_FINDER_APARTMENT_NUMBER", null));
-            //postData.Add(new KeyValuePair<string, string>("PRECINCT_FINDER_CITY", null));
-            postData.Add(new KeyValuePair<string, string>("PRECINCT_FINDER_ZIPCODE", zipCode));
-            postData.Add(new KeyValuePair<string, string>("lang", "en"));
 
+            if (!string.IsNullOrEmpty(aAddressData.BuildingID))
+            {
+                postData.Add(new KeyValuePair<string, string>("PRECINCT_FINDER_APARTMENT_NUMBER", aAddressData.BuildingID));
+            }
+
+            if (!string.IsNullOrEmpty(aAddressData.City))
+            {
+                postData.Add(new KeyValuePair<string, string>("PRECINCT_FINDER_CITY", null));
+            }
 
             using var content = new FormUrlEncodedContent(postData);
             content.Headers.Clear();
             content.Headers.Add("Content-Type", "application/x-www-form-urlencoded");
 
-            HttpResponseMessage response = await httpClient.PostAsync("https://www.dallascountyvotes.org/ce/mobile/seam/resource/rest/precinct/findstreet", content);
+            HttpResponseMessage response = await _httpClient.PostAsync("https://www.dallascountyvotes.org/ce/mobile/seam/resource/rest/precinct/findstreet", content);
 
             var responseString = await response.Content.ReadAsStringAsync();
 
             var precinctResponse = JsonConvert.DeserializeObject<PrecinctResponse>(responseString);
-
             return precinctResponse;
         }
     }
